@@ -20,9 +20,9 @@ spec:
         app: react-app
     spec:
       containers:
-      - name: react-app
-        image: IMAGE_PLACEHOLDER
-        imagePullPolicy: Always
+      - name: react-vite-app
+        image: react-app:IMAGE_PLACEHOLDER
+        imagePullPolicy: Never
         ports:
         - containerPort: 80
         resources:
