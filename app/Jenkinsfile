@@ -1,0 +1,93 @@
+pipeline {
+    agent any
+
+    environment {
+        AWS_REGION = 'us-east-1' // Override if needed
+        ECR_REPO_URI = '123456789012.dkr.ecr.us-east-1.amazonaws.com/react-app-repo' // To be updated by user
+        PROJECT_PREFIX = 'cicd-demo'
+        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(8)}"
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Install Dependencies') {
+            steps {
+                sh 'npm ci'
+            }
+        }
+
+        stage('Build React App') {
+            steps {
+                sh 'npm run build'
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${ECR_REPO_URI}:${IMAGE_TAG} -f app/Dockerfile ."
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO_URI}
+                        docker push ${ECR_REPO_URI}:${IMAGE_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Deploy to K3s') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        
+                        aws ssm get-parameter --region ${AWS_REGION} --name "/${PROJECT_PREFIX}/kubeconfig" --with-decryption --query "Parameter.Value" --output text > /tmp/kubeconfig
+                        export KUBECONFIG=/tmp/kubeconfig
+                        
+                        sed -i "s|IMAGE_PLACEHOLDER|${ECR_REPO_URI}:${IMAGE_TAG}|g" app/k8s/deployment.yaml
+                        
+                        kubectl apply -f app/k8s/deployment.yaml
+                        kubectl apply -f app/k8s/service.yaml
+                    """
+                }
+            }
+        }
+        
+        stage('Rollout Verification') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh """
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+                        export KUBECONFIG=/tmp/kubeconfig
+                        kubectl rollout status deployment/react-app-deployment --timeout=120s
+                    """
+                }
+            }
+        }
+    }
+}
