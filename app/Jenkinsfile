@@ -2,10 +2,8 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION = 'us-east-1' // Override if needed
-        ECR_REPO_URI = '123456789012.dkr.ecr.us-east-1.amazonaws.com/react-app-repo' // To be updated by user
-        PROJECT_PREFIX = 'cicd-demo'
-        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(8)}"
+        APP_NAME = "react-app"
+        IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_COMMIT.take(7)}"
     }
 
     stages {
@@ -14,7 +12,7 @@ pipeline {
                 checkout scm
             }
         }
-        
+
         stage('Install Dependencies') {
             steps {
                 sh 'npm ci'
@@ -29,65 +27,39 @@ pipeline {
 
         stage('Build Docker Image') {
             steps {
-                sh "docker build -t ${ECR_REPO_URI}:${IMAGE_TAG} -f app/Dockerfile ."
-            }
-        }
-
-        stage('Push to ECR') {
-            steps {
-                withCredentials([
-                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
-                ]) {
-                    sh """
-                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                        export AWS_DEFAULT_REGION=${AWS_REGION}
-                        aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO_URI}
-                        docker push ${ECR_REPO_URI}:${IMAGE_TAG}
-                    """
-                }
+                // Build the image locally
+                sh 'docker build -t ${APP_NAME}:${IMAGE_TAG} -f app/Dockerfile .'
             }
         }
 
         stage('Deploy to K3s') {
             steps {
-                withCredentials([
-                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
-                ]) {
-                    sh """
-                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                        export AWS_DEFAULT_REGION=${AWS_REGION}
-                        
-                        aws ssm get-parameter --region ${AWS_REGION} --name "/${PROJECT_PREFIX}/kubeconfig" --with-decryption --query "Parameter.Value" --output text > /tmp/kubeconfig
-                        export KUBECONFIG=/tmp/kubeconfig
-                        
-                        sed -i "s|IMAGE_PLACEHOLDER|${ECR_REPO_URI}:${IMAGE_TAG}|g" app/k8s/deployment.yaml
-                        
-                        kubectl apply -f app/k8s/deployment.yaml
-                        kubectl apply -f app/k8s/service.yaml
-                    """
+                // 1. Securely load the image directly into K3s containerd runtime
+                sh 'docker save ${APP_NAME}:${IMAGE_TAG} | sudo k3s ctr images import -'
+                
+                dir('app/k8s') {
+                    // 2. Inject the dynamic image tag safely into the deployment file
+                    sh 'sed -i "s/IMAGE_PLACEHOLDER/${IMAGE_TAG}/g" deployment.yaml'
+                    
+                    // 3. Apply to cluster using the local K3s config
+                    sh 'sudo k3s kubectl apply -f deployment.yaml'
+                    sh 'sudo k3s kubectl apply -f service.yaml'
                 }
             }
         }
-        
+
         stage('Rollout Verification') {
             steps {
-                withCredentials([
-                    string(credentialsId: 'aws-access-key', variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'aws-secret-key', variable: 'AWS_SECRET_ACCESS_KEY')
-                ]) {
-                    sh """
-                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-                        export AWS_DEFAULT_REGION=${AWS_REGION}
-                        export KUBECONFIG=/tmp/kubeconfig
-                        kubectl rollout status deployment/react-app-deployment --timeout=120s
-                    """
-                }
+                sh 'sudo k3s kubectl rollout status deployment/react-vite-app --timeout=90s'
             }
+        }
+    }
+    
+    post {
+        always {
+            // Cleanup local docker image to save disk space on the t3.micro
+            sh 'docker rmi ${APP_NAME}:${IMAGE_TAG} || true'
+            sh 'docker system prune -f'
         }
     }
 }
