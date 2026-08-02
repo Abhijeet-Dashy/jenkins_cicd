@@ -50,7 +50,7 @@ pipeline {
 
         stage('Rollout Verification') {
             steps {
-                sh 'sudo k3s kubectl rollout status deployment/react-vite-app --timeout=90s'
+                sh 'sudo k3s kubectl rollout status deployment/react-app-deployment --timeout=90s'
             }
         }
     }
